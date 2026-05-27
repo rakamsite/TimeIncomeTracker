@@ -42,6 +42,16 @@ pyinstaller --noconfirm --onefile --windowed --name TimeIncomeTracker main.py
 خروجی:
 - `dist\TimeIncomeTracker.exe`
 
+## دانلود نسخه exe بدون نصب Python
+1. به ریپازیتوری GitHub بروید و تب **Actions** را باز کنید.
+2. workflow با نام **build-windows** را انتخاب کنید.
+3. آخرین اجرای موفق را باز کنید.
+4. از بخش **Artifacts**، فایل **TimeIncomeTracker-Windows** را دانلود کنید.
+5. فایل دانلودشده (zip) را Extract کنید.
+6. فایل `TimeIncomeTracker.exe` را اجرا کنید.
+
+> نکته: اگر یک tag مثل `v1.0.0` ساخته و push شود، همین workflow فایل `TimeIncomeTracker.exe` را علاوه بر Artifacts، داخل **GitHub Releases** هم آپلود می‌کند.
+
 ## نکته مهم برای کاربر نهایی
 **کاربر نهایی نیازی به نصب Python، pip یا ابزار توسعه ندارد و فقط فایل `TimeIncomeTracker.exe` را اجرا می‌کند.**
 

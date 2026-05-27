@@ -1,0 +1,53 @@
+name: build-windows
+
+on:
+  push:
+    branches:
+      - '**'
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Install PyInstaller
+        run: pip install pyinstaller
+
+      - name: Build exe with PyInstaller
+        run: pyinstaller --noconfirm --onefile --windowed --name TimeIncomeTracker main.py
+
+      - name: Verify exe exists
+        shell: pwsh
+        run: |
+          if (!(Test-Path "dist/TimeIncomeTracker.exe")) {
+            Write-Error "dist/TimeIncomeTracker.exe not found"
+            exit 1
+          }
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TimeIncomeTracker-Windows
+          path: dist/TimeIncomeTracker.exe
+
+      - name: Upload exe to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/TimeIncomeTracker.exe
