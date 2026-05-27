@@ -6,7 +6,8 @@
 - تایمر دقیق Start / Pause / Resume / Stop & Save / Cancel
 - مدیریت پروژه با نرخ ساعتی (تومان)
 - ذخیره `hourly_rate_snapshot` برای پایداری گزارش‌ها
-- System Tray + Hotkey سراسری (پیش‌فرض Shift+Q)
+- اپلیکیشن کاملاً **tray-based** (بدون نمایش در Taskbar ویندوز)
+- System Tray دائم + Hotkey سراسری (پیش‌فرض Shift+Q)
 - تشخیص idle ویندوز با Windows API (`ctypes` + `GetLastInputInfo`)
 - auto-pause هنگام idle
 - نوتیفیکیشن دوره‌ای هنگام فعال بودن تایمر
@@ -54,6 +55,15 @@ pyinstaller --noconfirm --onefile --windowed --name TimeIncomeTracker main.py
 
 ## نکته مهم برای کاربر نهایی
 **کاربر نهایی نیازی به نصب Python، pip یا ابزار توسعه ندارد و فقط فایل `TimeIncomeTracker.exe` را اجرا می‌کند.**
+
+## رفتار پنجره و System Tray
+- برنامه بعد از اجرا همیشه آیکون Tray را نگه می‌دارد (چه پنجره باز باشد چه مخفی).
+- پنجره اصلی در Taskbar ویندوز نمایش داده نمی‌شود.
+- بستن پنجره با دکمه `X` برنامه را نمی‌بندد و فقط پنجره را Hide می‌کند.
+- با کلیک روی آیکون Tray (left click یا double click) یا گزینه `Open / Show` پنجره Show/Hide می‌شود.
+- خروج کامل فقط از طریق گزینه `Exit` در منوی Tray انجام می‌شود.
+- اگر تایمر فعال باشد و `Exit` بزنید، قبل از خروج پیام تأیید نمایش داده می‌شود.
+- گزینه `Show main window on startup` در Settings تعیین می‌کند پنجره هنگام اجرا خودکار نمایش داده شود یا خیر (پیش‌فرض: غیرفعال).
 
 ## Auto-start در نسخه Portable
 - برای نسخه portable، گزینه **Auto-start with Windows** در Settings بدون نیاز به admin کار می‌کند.

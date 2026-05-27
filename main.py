@@ -172,6 +172,8 @@ class SettingsDialog(QDialog):
         self.default_rate = QLineEdit(self.db.get_setting("default_rate", ""))
         self.auto_start = QCheckBox()
         self.auto_start.setChecked(self.db.get_setting("auto_start", "0") == "1")
+        self.show_on_startup = QCheckBox()
+        self.show_on_startup.setChecked(self.db.get_setting("show_main_window_on_startup", "0") == "1")
         self.excel_dir = QLineEdit(self.db.get_setting("excel_dir", str(app_dir)))
         browse = QPushButton("Browse")
         browse.clicked.connect(self.pick_dir)
@@ -184,6 +186,7 @@ class SettingsDialog(QDialog):
         gform.addRow("Idle minutes", self.idle_min)
         gform.addRow("Default hourly rate (Toman)", self.default_rate)
         gform.addRow("Auto-start with Windows", self.auto_start)
+        gform.addRow("Show main window on startup", self.show_on_startup)
         gform.addRow("Excel output directory", wrap)
 
         # Projects
@@ -258,6 +261,7 @@ class SettingsDialog(QDialog):
         self.db.set_setting("idle_minutes", self.idle_min.value())
         self.db.set_setting("default_rate", self.default_rate.text().strip())
         self.db.set_setting("auto_start", int(self.auto_start.isChecked()))
+        self.db.set_setting("show_main_window_on_startup", int(self.show_on_startup.isChecked()))
         self.db.set_setting("excel_dir", self.excel_dir.text().strip())
 
         try:
@@ -315,12 +319,20 @@ class MainWindow(QMainWindow):
     def __init__(self, db, app_dir):
         super().__init__()
         self.db, self.app_dir = db, app_dir
+        self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.Tool)
         self.setWindowTitle("Time Income Tracker")
         self.resize(980, 640)
         self.timer_state: Optional[TimerState] = None
         self.last_notification_at: Optional[datetime] = None
         self.hotkey_listener = None
-        self.tray = None
+        self.tray: Optional[QSystemTrayIcon] = None
+        self.is_quitting = False
+        self.tray_menu = None
+        self.open_act = None
+        self.hide_act = None
+        self.start_resume_act = None
+        self.pause_act = None
+        self.stop_act = None
 
         self.init_ui()
         self.apply_dark()
@@ -533,17 +545,21 @@ class MainWindow(QMainWindow):
     def init_tray(self):
         self.tray = QSystemTrayIcon(self)
         self.tray.setIcon(self.windowIcon() or QIcon())
-        menu = QMenu()
-        open_act = QAction("Open", self); open_act.triggered.connect(self.toggle_window)
-        pause_act = QAction("Pause/Resume", self); pause_act.triggered.connect(lambda: self.resume_timer() if self.timer_state and self.timer_state.is_paused else self.pause_timer())
-        stop_act = QAction("Stop & Save", self); stop_act.triggered.connect(self.stop_save)
+        self.tray_menu = QMenu()
+        self.open_act = QAction("Open / Show", self); self.open_act.triggered.connect(self.show_from_tray)
+        self.hide_act = QAction("Hide", self); self.hide_act.triggered.connect(self.hide)
+        self.start_resume_act = QAction("Start Timer", self); self.start_resume_act.triggered.connect(self.start_or_resume_timer)
+        self.pause_act = QAction("Pause Timer", self); self.pause_act.triggered.connect(self.pause_timer)
+        self.stop_act = QAction("Stop & Save", self); self.stop_act.triggered.connect(self.stop_save)
         settings_act = QAction("Settings", self); settings_act.triggered.connect(self.open_settings)
-        exit_act = QAction("Exit", self); exit_act.triggered.connect(self.full_exit)
-        for a in [open_act, pause_act, stop_act, settings_act, exit_act]:
-            menu.addAction(a)
-        self.tray.setContextMenu(menu)
-        self.tray.activated.connect(lambda reason: self.toggle_window() if reason == QSystemTrayIcon.ActivationReason.Trigger else None)
+        exit_act = QAction("Exit", self); exit_act.triggered.connect(self.quit_app)
+        for a in [self.open_act, self.hide_act, self.start_resume_act, self.pause_act, self.stop_act, settings_act, exit_act]:
+            self.tray_menu.addAction(a)
+        self.tray_menu.aboutToShow.connect(self.update_tray_menu)
+        self.tray.setContextMenu(self.tray_menu)
+        self.tray.activated.connect(self.on_tray_activated)
         self.tray.show()
+        self.update_tray_menu()
 
     def setup_hotkey(self):
         try:
@@ -556,7 +572,43 @@ class MainWindow(QMainWindow):
             self.status_lbl.setText(f"Status: Hotkey error ({e})")
 
     def toggle_window(self):
-        self.showNormal() if self.isHidden() else self.hide()
+        if self.isHidden():
+            self.show_from_tray()
+        else:
+            self.hide()
+
+    def show_from_tray(self):
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def on_tray_activated(self, reason):
+        if reason in (QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.DoubleClick):
+            self.toggle_window()
+
+    def start_or_resume_timer(self):
+        if self.timer_state and self.timer_state.is_paused:
+            self.resume_timer()
+        elif not self.timer_state:
+            self.start_timer()
+
+    def update_tray_menu(self):
+        if self.timer_state:
+            if self.timer_state.is_paused:
+                self.start_resume_act.setText("Resume Timer")
+                self.start_resume_act.setEnabled(True)
+                self.pause_act.setEnabled(False)
+                self.stop_act.setEnabled(True)
+            else:
+                self.start_resume_act.setText("Timer Running")
+                self.start_resume_act.setEnabled(False)
+                self.pause_act.setEnabled(True)
+                self.stop_act.setEnabled(True)
+        else:
+            self.start_resume_act.setText("Start Timer")
+            self.start_resume_act.setEnabled(True)
+            self.pause_act.setEnabled(False)
+            self.stop_act.setEnabled(False)
 
     def open_settings(self):
         dlg = SettingsDialog(self.db, self.app_dir, self)
@@ -615,17 +667,27 @@ class MainWindow(QMainWindow):
             return last_prev.replace(day=1), last_prev
         return custom_s, custom_e
 
-    def full_exit(self):
+    def quit_app(self):
         if self.timer_state and not self.timer_state.is_paused:
-            r = QMessageBox.question(self, "Exit", "یک تایمر فعال وجود دارد. قبل از خروج ذخیره شود؟", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel)
-            if r == QMessageBox.StandardButton.Cancel:
+            r = QMessageBox.question(
+                self,
+                "Exit",
+                "یک تایمر فعال وجود دارد. آیا از خروج مطمئن هستید؟",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if r != QMessageBox.StandardButton.Yes:
                 return
-            if r == QMessageBox.StandardButton.Yes:
-                self.stop_save()
+        self.is_quitting = True
+        if self.tray:
+            self.tray.hide()
         QApplication.quit()
 
     def closeEvent(self, event: QCloseEvent):
-        event.ignore(); self.hide()
+        if self.is_quitting:
+            event.accept()
+            return
+        event.ignore()
+        self.hide()
 
 
 def main():
@@ -634,7 +696,8 @@ def main():
     db = DB(d / "time_income.db")
     app = QApplication(sys.argv)
     win = MainWindow(db, d)
-    win.show()
+    if db.get_setting("show_main_window_on_startup", "0") == "1":
+        win.show_from_tray()
     sys.exit(app.exec())
 
 
