@@ -55,6 +55,14 @@ pyinstaller --noconfirm --onefile --windowed --name TimeIncomeTracker main.py
 ## نکته مهم برای کاربر نهایی
 **کاربر نهایی نیازی به نصب Python، pip یا ابزار توسعه ندارد و فقط فایل `TimeIncomeTracker.exe` را اجرا می‌کند.**
 
+## Auto-start در نسخه Portable
+- برای نسخه portable، گزینه **Auto-start with Windows** در Settings بدون نیاز به admin کار می‌کند.
+- با فعال‌کردن این گزینه، برنامه یک shortcut از `TimeIncomeTracker.exe` فعلی در Startup کاربر می‌سازد:
+  - `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\TimeIncomeTracker.lnk`
+- با غیرفعال‌کردن آن، همان shortcut حذف می‌شود.
+- اگر `exe` را جابه‌جا کنید، کافی است Auto-start را یک‌بار خاموش/روشن کنید تا shortcut با مسیر جدید ساخته شود.
+- چون برنامه portable است، بهتر است `TimeIncomeTracker.exe` را در یک مسیر ثابت نگه دارید (مثلاً `C:\Apps\TimeIncomeTracker`).
+
 ## Troubleshooting
 - اگر Hotkey ثبت نشد: برنامه ادامه می‌دهد و خطا در status/log نمایش داده می‌شود.
 - اگر Notification محدود بود: برنامه با fallback tray message اجرا می‌شود.

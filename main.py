@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import sqlite3
+import subprocess
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -169,6 +170,8 @@ class SettingsDialog(QDialog):
         self.idle_enabled = QCheckBox(); self.idle_enabled.setChecked(self.db.get_setting("idle_enabled", "1") == "1")
         self.idle_min = QSpinBox(); self.idle_min.setRange(1, 60); self.idle_min.setValue(int(self.db.get_setting("idle_minutes", "2")))
         self.default_rate = QLineEdit(self.db.get_setting("default_rate", ""))
+        self.auto_start = QCheckBox()
+        self.auto_start.setChecked(self.db.get_setting("auto_start", "0") == "1")
         self.excel_dir = QLineEdit(self.db.get_setting("excel_dir", str(app_dir)))
         browse = QPushButton("Browse")
         browse.clicked.connect(self.pick_dir)
@@ -180,6 +183,7 @@ class SettingsDialog(QDialog):
         gform.addRow("Auto-pause on idle", self.idle_enabled)
         gform.addRow("Idle minutes", self.idle_min)
         gform.addRow("Default hourly rate (Toman)", self.default_rate)
+        gform.addRow("Auto-start with Windows", self.auto_start)
         gform.addRow("Excel output directory", wrap)
 
         # Projects
@@ -253,11 +257,61 @@ class SettingsDialog(QDialog):
         self.db.set_setting("idle_enabled", int(self.idle_enabled.isChecked()))
         self.db.set_setting("idle_minutes", self.idle_min.value())
         self.db.set_setting("default_rate", self.default_rate.text().strip())
+        self.db.set_setting("auto_start", int(self.auto_start.isChecked()))
         self.db.set_setting("excel_dir", self.excel_dir.text().strip())
+
+        try:
+            MainWindow.sync_startup_shortcut(self.auto_start.isChecked())
+        except Exception as e:
+            logging.exception("auto-start sync failed")
+            QMessageBox.warning(self, "Auto-start", f"Auto-start update failed: {e}")
         self.accept()
 
 
 class MainWindow(QMainWindow):
+    @staticmethod
+    def startup_shortcut_path() -> Path:
+        startup_dir = Path(os.environ.get("APPDATA", str(Path.home()))) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
+        return startup_dir / f"{APP_NAME}.lnk"
+
+    @staticmethod
+    def current_app_path() -> Path:
+        if getattr(sys, "frozen", False):
+            return Path(sys.executable).resolve()
+        return Path(__file__).resolve()
+
+    @staticmethod
+    def sync_startup_shortcut(enabled: bool):
+        if os.name != "nt":
+            return
+        shortcut = MainWindow.startup_shortcut_path()
+        shortcut.parent.mkdir(parents=True, exist_ok=True)
+
+        if not enabled:
+            if shortcut.exists():
+                shortcut.unlink()
+            return
+
+        target = MainWindow.current_app_path()
+        workdir = target.parent
+        icon_location = str(target)
+        escaped_shortcut = str(shortcut).replace("'", "''")
+        escaped_target = str(target).replace("'", "''")
+        escaped_workdir = str(workdir).replace("'", "''")
+        escaped_icon = icon_location.replace("'", "''")
+        ps_script = (
+            f"$s=(New-Object -ComObject WScript.Shell).CreateShortcut('{escaped_shortcut}');"
+            f"$s.TargetPath='{escaped_target}';"
+            f"$s.WorkingDirectory='{escaped_workdir}';"
+            f"$s.IconLocation='{escaped_icon}';"
+            "$s.Save();"
+        )
+        subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_script],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
     def __init__(self, db, app_dir):
         super().__init__()
         self.db, self.app_dir = db, app_dir
