@@ -31,6 +31,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSpinBox,
+    QStyle,
     QSystemTrayIcon,
     QTableWidget,
     QTableWidgetItem,
@@ -542,9 +543,19 @@ class MainWindow(QMainWindow):
             self.pause_timer(auto=True)
             self.banner.setText("تایمر به دلیل عدم فعالیت متوقف شد. Resume / Keep Paused / Stop & Save")
 
+    def build_app_icon(self) -> QIcon:
+        icon = QIcon(self.db.get_setting("tray_icon_path", ""))
+        if icon.isNull():
+            icon = self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
+        return icon
+
     def init_tray(self):
         self.tray = QSystemTrayIcon(self)
-        self.tray.setIcon(self.windowIcon() or QIcon())
+        app_icon = self.windowIcon()
+        if app_icon.isNull():
+            app_icon = self.build_app_icon()
+            self.setWindowIcon(app_icon)
+        self.tray.setIcon(app_icon)
         self.tray_menu = QMenu()
         self.open_act = QAction("Open / Show", self); self.open_act.triggered.connect(self.show_from_tray)
         self.hide_act = QAction("Hide", self); self.hide_act.triggered.connect(self.hide)
@@ -696,6 +707,7 @@ def main():
     db = DB(d / "time_income.db")
     app = QApplication(sys.argv)
     win = MainWindow(db, d)
+    app.setWindowIcon(win.windowIcon())
     if db.get_setting("show_main_window_on_startup", "0") == "1":
         win.show_from_tray()
     sys.exit(app.exec())
