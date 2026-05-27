@@ -156,6 +156,7 @@ class SettingsDialog(QDialog):
         self.app_dir = app_dir
         self.setWindowTitle("Settings")
         self.resize(700, 500)
+        self.setModal(True)
         tabs = QTabWidget()
 
         # General
@@ -199,6 +200,7 @@ class SettingsDialog(QDialog):
         self.load_projects()
 
         btn = QPushButton("Save Settings")
+        btn.setObjectName("primaryButton")
         btn.clicked.connect(self.save_settings)
         layout = QVBoxLayout(self); layout.addWidget(tabs); layout.addWidget(btn)
 
@@ -244,6 +246,7 @@ class SettingsDialog(QDialog):
         self.load_projects()
 
     def save_settings(self):
+        self.save_projects()
         self.db.set_setting("hotkey", self.hotkey.text().strip() or "<shift>+q")
         self.db.set_setting("notify_enabled", int(self.notify_enabled.isChecked()))
         self.db.set_setting("notify_minutes", self.notify_min.value())
@@ -259,7 +262,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.db, self.app_dir = db, app_dir
         self.setWindowTitle("Time Income Tracker")
-        self.resize(800, 550)
+        self.resize(980, 640)
         self.timer_state: Optional[TimerState] = None
         self.last_notification_at: Optional[datetime] = None
         self.hotkey_listener = None
@@ -276,30 +279,70 @@ class MainWindow(QMainWindow):
     def init_ui(self):
         w = QWidget(); self.setCentralWidget(w)
         v = QVBoxLayout(w)
+        v.setContentsMargins(22, 22, 22, 22)
+        v.setSpacing(16)
 
         self.project_combo = QComboBox()
         self.desc = QTextEdit(); self.desc.setPlaceholderText("شرح فعالیت")
-        self.timer_lbl = QLabel("00:00:00"); self.timer_lbl.setStyleSheet("font-size:36px;font-weight:bold;")
+        self.timer_lbl = QLabel("00:00:00"); self.timer_lbl.setObjectName("timerLabel")
         self.amount_lbl = QLabel("0 تومان")
+        self.amount_lbl.setObjectName("amountLabel")
         self.status_lbl = QLabel("Status: idle")
+        self.status_lbl.setObjectName("statusLabel")
         self.banner = QLabel("")
-        self.banner.setStyleSheet("color:#f5c542;")
+        self.banner.setObjectName("bannerLabel")
 
         form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        form.setVerticalSpacing(12)
         form.addRow("Project", self.project_combo)
         form.addRow("Description", self.desc)
 
         btns = QHBoxLayout()
-        for t, fn in [
-            ("Start", self.start_timer), ("Pause", self.pause_timer), ("Resume", self.resume_timer),
-            ("Stop & Save", self.stop_save), ("Cancel", self.cancel_timer), ("Settings", self.open_settings), ("Export Excel", self.export_excel)
-        ]:
-            b = QPushButton(t); b.clicked.connect(fn); btns.addWidget(b)
+        button_map = [
+            ("Start", self.start_timer, "primaryButton"),
+            ("Pause", self.pause_timer, ""),
+            ("Resume", self.resume_timer, ""),
+            ("Stop & Save", self.stop_save, "successButton"),
+            ("Cancel", self.cancel_timer, "dangerButton"),
+            ("Settings", self.open_settings, ""),
+            ("Export Excel", self.export_excel, ""),
+        ]
+        for t, fn, cls in button_map:
+            b = QPushButton(t)
+            if cls:
+                b.setObjectName(cls)
+            b.clicked.connect(fn)
+            btns.addWidget(b)
 
         v.addLayout(form); v.addWidget(self.timer_lbl); v.addWidget(self.amount_lbl); v.addWidget(self.status_lbl); v.addWidget(self.banner); v.addLayout(btns)
 
     def apply_dark(self):
-        self.setStyleSheet("QWidget{background:#1e1e1e;color:#ddd;}QLineEdit,QTextEdit,QComboBox,QSpinBox,QDateEdit,QTableWidget{background:#2b2b2b;color:#fff;border:1px solid #444;}QPushButton{background:#333;padding:8px;}QPushButton:hover{background:#444;}")
+        self.setStyleSheet("""
+            QWidget { background:#0f172a; color:#e2e8f0; font-size:14px; }
+            QMainWindow { background:#0f172a; }
+            QLineEdit, QTextEdit, QComboBox, QSpinBox, QDateEdit, QTableWidget, QTabWidget::pane {
+                background:#1e293b; color:#f8fafc; border:1px solid #334155; border-radius:10px; padding:7px;
+            }
+            QComboBox::drop-down { border:none; }
+            QPushButton {
+                background:#334155; color:#f8fafc; border:1px solid #475569; border-radius:10px; padding:10px 14px; font-weight:600;
+            }
+            QPushButton:hover { background:#475569; }
+            QPushButton#primaryButton { background:#2563eb; border:1px solid #3b82f6; }
+            QPushButton#primaryButton:hover { background:#1d4ed8; }
+            QPushButton#successButton { background:#059669; border:1px solid #10b981; }
+            QPushButton#successButton:hover { background:#047857; }
+            QPushButton#dangerButton { background:#dc2626; border:1px solid #ef4444; }
+            QPushButton#dangerButton:hover { background:#b91c1c; }
+            QLabel#timerLabel { font-size:52px; font-weight:800; color:#f8fafc; padding-top:8px; }
+            QLabel#amountLabel { font-size:26px; font-weight:700; color:#93c5fd; }
+            QLabel#statusLabel { color:#94a3b8; font-size:13px; }
+            QLabel#bannerLabel { color:#facc15; font-weight:600; min-height:22px; }
+            QHeaderView::section { background:#1e293b; color:#cbd5e1; border:1px solid #334155; padding:6px; font-weight:700; }
+            QTabBar::tab { background:#1e293b; color:#cbd5e1; padding:8px 14px; border-top-left-radius:8px; border-top-right-radius:8px; margin-right:4px; }
+            QTabBar::tab:selected { background:#2563eb; color:#ffffff; }
+        """)
 
     def load_projects(self):
         self.project_combo.clear()
