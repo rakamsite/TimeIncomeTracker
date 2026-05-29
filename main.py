@@ -13,13 +13,16 @@ from typing import Optional
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
-from PyQt6.QtCore import QTimer, Qt
-from PyQt6.QtGui import QAction, QCloseEvent, QIcon
+from PyQt6.QtCore import QDateTime, QTimer, Qt
+from PyQt6.QtGui import QAction, QCloseEvent, QFont, QFontDatabase, QIcon
+from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtWidgets import (
     QApplication,
+    QAbstractItemView,
     QCheckBox,
     QComboBox,
     QDateEdit,
+    QDateTimeEdit,
     QDialog,
     QFileDialog,
     QFormLayout,
@@ -42,6 +45,53 @@ from PyQt6.QtWidgets import (
 )
 
 APP_NAME = "TimeIncomeTracker"
+SINGLE_INSTANCE_KEY = f"{APP_NAME}.single-instance"
+PREFERRED_FONT_FAMILIES = ["IRANSans", "IRANSansX", "Iran Sans", "Yekan", "B Yekan", "Vazirmatn", "Tahoma", "Segoe UI"]
+APP_FONT_SIZE = 10
+AUTO_RESUME_ACTIVITY_SECONDS = 5
+
+
+def preferred_font_family() -> str:
+    installed = set(QFontDatabase.families())
+    for family in PREFERRED_FONT_FAMILIES:
+        if family in installed:
+            return family
+    return PREFERRED_FONT_FAMILIES[-1]
+
+
+def apply_app_font(app: QApplication) -> str:
+    family = preferred_font_family()
+    app.setFont(QFont(family, APP_FONT_SIZE))
+    app.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+    return family
+
+
+def stylesheet_font_family() -> str:
+    return ", ".join(f'"{family}"' for family in PREFERRED_FONT_FAMILIES)
+
+
+RTL_ALIGNMENT = Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+
+
+def configure_rtl_widget(widget: QWidget):
+    widget.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+    for child in widget.findChildren(QWidget):
+        child.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+        if isinstance(child, (QLineEdit, QSpinBox, QDateEdit, QDateTimeEdit)):
+            child.setAlignment(RTL_ALIGNMENT)
+        elif isinstance(child, QTextEdit):
+            child.setAlignment(Qt.AlignmentFlag.AlignRight)
+        elif isinstance(child, QLabel):
+            child.setAlignment(RTL_ALIGNMENT)
+        elif isinstance(child, QTableWidget):
+            child.horizontalHeader().setDefaultAlignment(RTL_ALIGNMENT)
+            child.verticalHeader().setDefaultAlignment(RTL_ALIGNMENT)
+
+
+def rtl_item(value) -> QTableWidgetItem:
+    item = QTableWidgetItem(str(value))
+    item.setTextAlignment(RTL_ALIGNMENT)
+    return item
 
 
 def app_data_dir() -> Path:
@@ -120,6 +170,36 @@ class DB:
         return row[0] if row else default
 
 
+class SingleInstanceServer:
+    def __init__(self, show_callback):
+        self.show_callback = show_callback
+        self.server = QLocalServer()
+        self.server.newConnection.connect(self.on_new_connection)
+
+    @staticmethod
+    def signal_existing() -> bool:
+        socket = QLocalSocket()
+        socket.connectToServer(SINGLE_INSTANCE_KEY)
+        if socket.waitForConnected(250):
+            socket.write(b"show")
+            socket.flush()
+            socket.waitForBytesWritten(500)
+            socket.disconnectFromServer()
+            return True
+        return False
+
+    def listen(self) -> bool:
+        QLocalServer.removeServer(SINGLE_INSTANCE_KEY)
+        return self.server.listen(SINGLE_INSTANCE_KEY)
+
+    def on_new_connection(self):
+        while self.server.hasPendingConnections():
+            socket = self.server.nextPendingConnection()
+            socket.readyRead.connect(socket.readAll)
+            socket.disconnected.connect(socket.deleteLater)
+            self.show_callback()
+
+
 class IdleMonitor:
     class LASTINPUTINFO(ctypes.Structure):
         _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint)]
@@ -149,6 +229,122 @@ class TimerState:
     pause_started_at: Optional[datetime] = None
     auto_paused: bool = False
     hourly_rate_snapshot: Optional[int] = None
+
+
+def format_duration(seconds: int) -> str:
+    seconds = max(0, int(seconds or 0))
+    return f"{seconds//3600:02}:{(seconds%3600)//60:02}:{seconds%60:02}"
+
+
+def parse_datetime(value: str) -> datetime:
+    return datetime.fromisoformat(value)
+
+
+def to_qdatetime(value: datetime) -> QDateTime:
+    return QDateTime(value.year, value.month, value.day, value.hour, value.minute, value.second)
+
+
+def money(value) -> str:
+    return "" if value is None else f"{int(value):,}"
+
+
+class RecordEditDialog(QDialog):
+    def __init__(self, db: DB, record_id: int, parent=None):
+        super().__init__(parent)
+        self.db = db
+        self.record_id = record_id
+        self.setWindowTitle("Edit Record")
+        self.setModal(True)
+        self.resize(620, 420)
+        row = self.db.conn.execute("SELECT * FROM time_entries WHERE id=?", (record_id,)).fetchone()
+        if not row:
+            raise ValueError("Record not found")
+        self.row = row
+
+        layout = QFormLayout(self)
+        self.project = QComboBox()
+        for p in self.db.conn.execute("SELECT * FROM projects ORDER BY name"):
+            self.project.addItem(p["name"], dict(p))
+            if p["id"] == row["project_id"]:
+                self.project.setCurrentIndex(self.project.count() - 1)
+
+        self.description = QTextEdit(row["task_description"] or "")
+        self.start_time = QDateTimeEdit()
+        self.start_time.setCalendarPopup(True)
+        self.start_time.setDisplayFormat("yyyy-MM-dd HH:mm:ss")
+        self.start_time.setDateTime(to_qdatetime(parse_datetime(row["start_time"])))
+        self.end_time = QDateTimeEdit()
+        self.end_time.setCalendarPopup(True)
+        self.end_time.setDisplayFormat("yyyy-MM-dd HH:mm:ss")
+        self.end_time.setDateTime(to_qdatetime(parse_datetime(row["end_time"])))
+        self.rate = QLineEdit("" if row["hourly_rate_snapshot"] is None else str(row["hourly_rate_snapshot"]))
+        self.amount = QLineEdit("" if row["amount"] is None else str(row["amount"]))
+        self.duration_lbl = QLabel("")
+
+        recalc = QPushButton("Recalculate")
+        recalc.clicked.connect(self.recalculate)
+        save = QPushButton("Save")
+        save.setObjectName("successButton")
+        save.clicked.connect(self.save)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        buttons = QHBoxLayout()
+        buttons.addWidget(recalc); buttons.addStretch(); buttons.addWidget(cancel); buttons.addWidget(save)
+
+        layout.addRow("Project", self.project)
+        layout.addRow("Description", self.description)
+        layout.addRow("Start", self.start_time)
+        layout.addRow("End", self.end_time)
+        layout.addRow("Hourly rate", self.rate)
+        layout.addRow("Amount", self.amount)
+        layout.addRow("Duration", self.duration_lbl)
+        layout.addRow(buttons)
+        layout.setFormAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop)
+        layout.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        configure_rtl_widget(self)
+        self.recalculate()
+
+    def current_duration_seconds(self) -> int:
+        start = self.start_time.dateTime().toPyDateTime()
+        end = self.end_time.dateTime().toPyDateTime()
+        return max(0, int((end - start).total_seconds()))
+
+    def recalculate(self):
+        dur = self.current_duration_seconds()
+        self.duration_lbl.setText(format_duration(dur))
+        rate_txt = self.rate.text().replace(",", "").strip()
+        if rate_txt:
+            self.amount.setText(str(int(dur / 3600 * int(rate_txt))))
+
+    def save(self):
+        project = self.project.currentData()
+        if not project:
+            QMessageBox.warning(self, "Warning", "Please select a project.")
+            return
+        start = self.start_time.dateTime().toPyDateTime()
+        end = self.end_time.dateTime().toPyDateTime()
+        if end < start:
+            QMessageBox.warning(self, "Warning", "End time must be after start time.")
+            return
+        rate_txt = self.rate.text().replace(",", "").strip()
+        amount_txt = self.amount.text().replace(",", "").strip()
+        rate = int(rate_txt) if rate_txt else None
+        amount = int(amount_txt) if amount_txt else None
+        self.db.conn.execute(
+            """
+            UPDATE time_entries
+            SET project_id=?, project_name_snapshot=?, task_description=?, start_time=?, end_time=?,
+                duration_seconds=?, hourly_rate_snapshot=?, amount=?, updated_at=?
+            WHERE id=?
+            """,
+            (
+                project["id"], project["name"], self.description.toPlainText().strip(),
+                start.isoformat(), end.isoformat(), self.current_duration_seconds(), rate, amount,
+                datetime.now().isoformat(), self.record_id,
+            ),
+        )
+        self.db.conn.commit()
+        self.accept()
 
 
 class SettingsDialog(QDialog):
@@ -193,8 +389,9 @@ class SettingsDialog(QDialog):
         # Projects
         projects = QWidget()
         pv = QVBoxLayout(projects)
-        self.table = QTableWidget(0, 4)
-        self.table.setHorizontalHeaderLabels(["ID", "Name", "Rate", "Active"])
+        self.table = QTableWidget(0, 5)
+        self.table.setHorizontalHeaderLabels(["ID", "Name", "Rate", "Active", "Report"])
+        self.table.setColumnHidden(0, True)
         pv.addWidget(self.table)
         hp = QHBoxLayout()
         add_btn, save_btn = QPushButton("Add"), QPushButton("Save Projects")
@@ -211,6 +408,9 @@ class SettingsDialog(QDialog):
         btn.setObjectName("primaryButton")
         btn.clicked.connect(self.save_settings)
         layout = QVBoxLayout(self); layout.addWidget(tabs); layout.addWidget(btn)
+        gform.setFormAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop)
+        gform.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        configure_rtl_widget(self)
 
     def pick_dir(self):
         path = QFileDialog.getExistingDirectory(self, "Select folder", self.excel_dir.text())
@@ -221,17 +421,24 @@ class SettingsDialog(QDialog):
         rows = self.db.conn.execute("SELECT * FROM projects ORDER BY id DESC").fetchall()
         self.table.setRowCount(len(rows))
         for i, r in enumerate(rows):
-            self.table.setItem(i, 0, QTableWidgetItem(str(r["id"])))
-            self.table.setItem(i, 1, QTableWidgetItem(r["name"]))
-            self.table.setItem(i, 2, QTableWidgetItem("" if r["hourly_rate"] is None else str(r["hourly_rate"])))
-            self.table.setItem(i, 3, QTableWidgetItem("1" if r["is_active"] else "0"))
+            self.table.setItem(i, 0, rtl_item(r["id"]))
+            self.table.setItem(i, 1, rtl_item(r["name"]))
+            self.table.setItem(i, 2, rtl_item("" if r["hourly_rate"] is None else str(r["hourly_rate"])))
+            self.table.setCellWidget(i, 3, self.create_active_toggle(bool(r["is_active"])))
+            report = QPushButton("مشاهده گزارش")
+            report.clicked.connect(lambda _checked=False, project_id=r["id"]: self.open_project_report(project_id))
+            self.table.setCellWidget(i, 4, report)
 
     def add_project_row(self):
         i = self.table.rowCount(); self.table.insertRow(i)
-        self.table.setItem(i, 0, QTableWidgetItem(""))
-        self.table.setItem(i, 1, QTableWidgetItem(""))
-        self.table.setItem(i, 2, QTableWidgetItem(""))
-        self.table.setItem(i, 3, QTableWidgetItem("1"))
+        self.table.setItem(i, 0, rtl_item(""))
+        self.table.setItem(i, 1, rtl_item(""))
+        self.table.setItem(i, 2, rtl_item(""))
+        self.table.setCellWidget(i, 3, self.create_active_toggle(True))
+        report = QPushButton("مشاهده گزارش")
+        report.setEnabled(False)
+        report.setToolTip("ابتدا پروژه را ذخیره کنید.")
+        self.table.setCellWidget(i, 4, report)
 
     def save_projects(self):
         for r in range(self.table.rowCount()):
@@ -242,7 +449,8 @@ class SettingsDialog(QDialog):
             rate_txt = (self.table.item(r, 2).text() if self.table.item(r, 2) else "").replace(",", "").strip()
             rate = int(rate_txt) if rate_txt else None
             has_rate = 1 if rate is not None else 0
-            active = 1 if (self.table.item(r, 3).text() if self.table.item(r, 3) else "1").strip() != "0" else 0
+            active_widget = self.table.cellWidget(r, 3)
+            active = 1 if isinstance(active_widget, QPushButton) and active_widget.isChecked() else 0
             now = datetime.now().isoformat()
             if pid:
                 self.db.conn.execute("UPDATE projects SET name=?,hourly_rate=?,has_hourly_rate=?,is_active=?,updated_at=? WHERE id=?",
@@ -252,6 +460,27 @@ class SettingsDialog(QDialog):
                                      (name, rate, has_rate, active, now, now))
         self.db.conn.commit()
         self.load_projects()
+
+    def create_active_toggle(self, checked: bool) -> QPushButton:
+        button = QPushButton()
+        button.setCheckable(True)
+        button.setObjectName("activeToggle")
+        button.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+
+        def update_text(is_checked: bool):
+            button.setText("روشن" if is_checked else "خاموش")
+
+        button.toggled.connect(update_text)
+        button.setChecked(checked)
+        update_text(checked)
+        return button
+
+    def open_project_report(self, project_id: int):
+        self.save_projects()
+        parent = self.parent()
+        if parent and hasattr(parent, "show_project_records"):
+            parent.show_project_records(project_id)
+            self.accept()
 
     def save_settings(self):
         self.save_projects()
@@ -334,8 +563,10 @@ class MainWindow(QMainWindow):
         self.start_resume_act = None
         self.pause_act = None
         self.stop_act = None
+        self.last_tick_at = datetime.now()
 
         self.init_ui()
+        configure_rtl_widget(self)
         self.apply_dark()
         self.load_projects()
         self.restore_active_state()
@@ -345,8 +576,13 @@ class MainWindow(QMainWindow):
 
     def init_ui(self):
         w = QWidget(); self.setCentralWidget(w)
-        v = QVBoxLayout(w)
-        v.setContentsMargins(22, 22, 22, 22)
+        root = QVBoxLayout(w)
+        root.setContentsMargins(22, 22, 22, 22)
+        self.main_tabs = QTabWidget()
+        root.addWidget(self.main_tabs)
+
+        timer_tab = QWidget()
+        v = QVBoxLayout(timer_tab)
         v.setSpacing(16)
 
         self.project_combo = QComboBox()
@@ -360,6 +596,7 @@ class MainWindow(QMainWindow):
         self.banner.setObjectName("bannerLabel")
 
         form = QFormLayout()
+        form.setFormAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop)
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
         form.setVerticalSpacing(12)
         form.addRow("Project", self.project_combo)
@@ -383,12 +620,58 @@ class MainWindow(QMainWindow):
             btns.addWidget(b)
 
         v.addLayout(form); v.addWidget(self.timer_lbl); v.addWidget(self.amount_lbl); v.addWidget(self.status_lbl); v.addWidget(self.banner); v.addLayout(btns)
+        self.main_tabs.addTab(timer_tab, "Timer")
+        self.build_records_tab()
+
+    def build_records_tab(self):
+        records_tab = QWidget()
+        layout = QVBoxLayout(records_tab)
+        filters = QHBoxLayout()
+        self.records_project = QComboBox(); self.records_project.addItem("All projects", None)
+        self.records_start = QDateEdit(); self.records_start.setCalendarPopup(True)
+        self.records_end = QDateEdit(); self.records_end.setCalendarPopup(True)
+        today = datetime.now().date()
+        self.records_start.setDate(today.replace(day=1))
+        self.records_end.setDate(today)
+        refresh = QPushButton("Refresh")
+        refresh.clicked.connect(self.load_records)
+        filters.addWidget(QLabel("Project")); filters.addWidget(self.records_project)
+        filters.addWidget(QLabel("From")); filters.addWidget(self.records_start)
+        filters.addWidget(QLabel("To")); filters.addWidget(self.records_end)
+        filters.addWidget(refresh); filters.addStretch()
+
+        self.records_summary = QTableWidget(0, 4)
+        self.records_summary.setHorizontalHeaderLabels(["Project", "Records", "Total time", "Total income"])
+        self.records_summary.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+
+        self.records_table = QTableWidget(0, 9)
+        self.records_table.setHorizontalHeaderLabels(["ID", "Date", "Project", "Description", "Start", "End", "Duration", "Rate", "Amount"])
+        self.records_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.records_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.records_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.records_table.doubleClicked.connect(self.edit_selected_record)
+
+        actions = QHBoxLayout()
+        edit = QPushButton("Edit selected")
+        delete = QPushButton("Delete selected")
+        delete.setObjectName("dangerButton")
+        edit.clicked.connect(self.edit_selected_record)
+        delete.clicked.connect(self.delete_selected_record)
+        actions.addWidget(edit); actions.addWidget(delete); actions.addStretch()
+
+        layout.addLayout(filters)
+        layout.addWidget(QLabel("Project totals"))
+        layout.addWidget(self.records_summary)
+        layout.addWidget(QLabel("Records"))
+        layout.addWidget(self.records_table)
+        layout.addLayout(actions)
+        self.main_tabs.addTab(records_tab, "Records")
 
     def apply_dark(self):
         self.setStyleSheet("""
-            QWidget { background:#0f172a; color:#e2e8f0; font-size:14px; }
+            QWidget { background:#0f172a; color:#e2e8f0; font-family:APP_FONT_STACK; font-size:14px; }
             QMainWindow { background:#0f172a; }
-            QLineEdit, QTextEdit, QComboBox, QSpinBox, QDateEdit, QTableWidget, QTabWidget::pane {
+            QLineEdit, QTextEdit, QComboBox, QSpinBox, QDateEdit, QDateTimeEdit, QTableWidget, QTabWidget::pane {
                 background:#1e293b; color:#f8fafc; border:1px solid #334155; border-radius:10px; padding:7px;
             }
             QComboBox::drop-down { border:none; }
@@ -402,6 +685,8 @@ class MainWindow(QMainWindow):
             QPushButton#successButton:hover { background:#047857; }
             QPushButton#dangerButton { background:#dc2626; border:1px solid #ef4444; }
             QPushButton#dangerButton:hover { background:#b91c1c; }
+            QPushButton#activeToggle { background:#475569; border:1px solid #64748b; padding:6px 10px; }
+            QPushButton#activeToggle:checked { background:#059669; border:1px solid #10b981; }
             QLabel#timerLabel { font-size:52px; font-weight:800; color:#f8fafc; padding-top:8px; }
             QLabel#amountLabel { font-size:26px; font-weight:700; color:#93c5fd; }
             QLabel#statusLabel { color:#94a3b8; font-size:13px; }
@@ -409,20 +694,33 @@ class MainWindow(QMainWindow):
             QHeaderView::section { background:#1e293b; color:#cbd5e1; border:1px solid #334155; padding:6px; font-weight:700; }
             QTabBar::tab { background:#1e293b; color:#cbd5e1; padding:8px 14px; border-top-left-radius:8px; border-top-right-radius:8px; margin-right:4px; }
             QTabBar::tab:selected { background:#2563eb; color:#ffffff; }
-        """)
+        """.replace("APP_FONT_STACK", stylesheet_font_family()))
 
     def load_projects(self):
         self.project_combo.clear()
         rows = self.db.conn.execute("SELECT * FROM projects WHERE is_active=1 ORDER BY name").fetchall()
         for r in rows:
             self.project_combo.addItem(r["name"], dict(r))
+        if hasattr(self, "records_project"):
+            current = self.records_project.currentData()
+            self.records_project.blockSignals(True)
+            self.records_project.clear()
+            self.records_project.addItem("All projects", None)
+            selected = 0
+            for r in self.db.conn.execute("SELECT id,name FROM projects ORDER BY name"):
+                self.records_project.addItem(r["name"], r["id"])
+                if current == r["id"]:
+                    selected = self.records_project.count() - 1
+            self.records_project.setCurrentIndex(selected)
+            self.records_project.blockSignals(False)
+            self.load_records()
 
-    def current_duration(self):
+    def current_duration(self, at_time: Optional[datetime] = None):
         if not self.timer_state:
             return 0
         d = self.timer_state.accumulated_seconds
         if not self.timer_state.is_paused:
-            d += int((datetime.now() - self.timer_state.start_time).total_seconds())
+            d += int(((at_time or datetime.now()) - self.timer_state.start_time).total_seconds())
         return max(0, d)
 
     def start_timer(self):
@@ -437,10 +735,10 @@ class MainWindow(QMainWindow):
         self.status_lbl.setText("Status: running")
         self.save_active_state()
 
-    def pause_timer(self, auto=False):
+    def pause_timer(self, auto=False, effective_end: Optional[datetime] = None):
         if not self.timer_state or self.timer_state.is_paused:
             return
-        self.timer_state.accumulated_seconds = self.current_duration()
+        self.timer_state.accumulated_seconds = self.current_duration(effective_end)
         self.timer_state.is_paused = True
         self.timer_state.pause_started_at = datetime.now()
         self.timer_state.auto_paused = auto
@@ -474,21 +772,26 @@ class MainWindow(QMainWindow):
         self.db.conn.commit()
         self.timer_state = None
         self.status_lbl.setText("Status: saved")
+        self.load_records()
 
     def cancel_timer(self):
         self.timer_state = None
         self.db.conn.execute("DELETE FROM active_timer_state")
         self.db.conn.commit()
         self.status_lbl.setText("Status: cancelled")
+        self.timer_lbl.setText("00:00:00")
+        self.amount_lbl.setText("0 تومان")
 
-    def save_active_state(self):
+    def save_active_state(self, accumulated_override: Optional[int] = None, is_paused_override: Optional[bool] = None):
         if not self.timer_state:
             return
+        accumulated = self.timer_state.accumulated_seconds if accumulated_override is None else accumulated_override
+        is_paused = self.timer_state.is_paused if is_paused_override is None else is_paused_override
         self.db.conn.execute("DELETE FROM active_timer_state")
         self.db.conn.execute("""INSERT INTO active_timer_state(id,project_id,project_name_snapshot,task_description,start_time,accumulated_seconds,is_paused,pause_started_at,auto_paused,hourly_rate_snapshot,updated_at)
                            VALUES(1,?,?,?,?,?,?,?,?,?,?)""",
                            (self.timer_state.project_id, self.timer_state.project_name, self.timer_state.task_description,
-                            self.timer_state.start_time.isoformat(), self.timer_state.accumulated_seconds, int(self.timer_state.is_paused),
+                            self.timer_state.start_time.isoformat(), accumulated, int(is_paused),
                             self.timer_state.pause_started_at.isoformat() if self.timer_state.pause_started_at else None,
                             int(self.timer_state.auto_paused), self.timer_state.hourly_rate_snapshot, datetime.now().isoformat()))
         self.db.conn.commit()
@@ -503,6 +806,12 @@ class MainWindow(QMainWindow):
             is_paused=bool(row["is_paused"]), pause_started_at=datetime.fromisoformat(row["pause_started_at"]) if row["pause_started_at"] else None,
             auto_paused=bool(row["auto_paused"]), hourly_rate_snapshot=row["hourly_rate_snapshot"]
         )
+        if not self.timer_state.is_paused:
+            self.timer_state.is_paused = True
+            self.timer_state.pause_started_at = datetime.now()
+            self.timer_state.auto_paused = True
+            self.banner.setText("تایمر بعد از اجرای دوباره برنامه متوقف نگه داشته شد تا زمان خاموشی/استندبای محاسبه نشود.")
+            self.save_active_state()
         self.desc.setPlainText(self.timer_state.task_description)
         self.status_lbl.setText("Status: paused" if self.timer_state.is_paused else "Status: running")
 
@@ -511,6 +820,8 @@ class MainWindow(QMainWindow):
         self.idle_timer = QTimer(self); self.idle_timer.setInterval(5000); self.idle_timer.timeout.connect(self.check_idle); self.idle_timer.start()
 
     def tick(self):
+        self.resume_after_activity_if_needed()
+        self.pause_for_inactivity_if_needed()
         d = self.current_duration()
         self.timer_lbl.setText(f"{d//3600:02}:{(d%3600)//60:02}:{d%60:02}")
         if self.timer_state and self.timer_state.hourly_rate_snapshot:
@@ -519,6 +830,9 @@ class MainWindow(QMainWindow):
         else:
             self.amount_lbl.setText("0 تومان")
         self.notify_if_needed()
+        if self.timer_state and not self.timer_state.is_paused:
+            self.save_active_state(accumulated_override=d)
+        self.last_tick_at = datetime.now()
 
     def notify_if_needed(self):
         if not self.timer_state or self.timer_state.is_paused:
@@ -534,14 +848,35 @@ class MainWindow(QMainWindow):
             self.tray.showMessage("Time Income Tracker", f"هنوز مشغول «{self.timer_state.task_description or self.timer_state.project_name}» هستی؟", QSystemTrayIcon.MessageIcon.Information, 6000)
 
     def check_idle(self):
+        self.resume_after_activity_if_needed()
+        self.pause_for_inactivity_if_needed()
+
+    def resume_after_activity_if_needed(self):
+        if not self.timer_state or not self.timer_state.is_paused or not self.timer_state.auto_paused:
+            return
+        if self.db.get_setting("idle_enabled", "1") != "1":
+            return
+        if IdleMonitor.idle_seconds() <= AUTO_RESUME_ACTIVITY_SECONDS:
+            self.resume_timer()
+            self.banner.setText("فعالیت موس/کیبورد تشخیص داده شد؛ تایمر به صورت خودکار ادامه پیدا کرد.")
+
+    def pause_for_inactivity_if_needed(self):
         if not self.timer_state or self.timer_state.is_paused:
             return
         if self.db.get_setting("idle_enabled", "1") != "1":
             return
         mins = int(self.db.get_setting("idle_minutes", "2"))
-        if IdleMonitor.idle_seconds() >= mins * 60:
-            self.pause_timer(auto=True)
-            self.banner.setText("تایمر به دلیل عدم فعالیت متوقف شد. Resume / Keep Paused / Stop & Save")
+        now = datetime.now()
+        gap_seconds = int((now - self.last_tick_at).total_seconds())
+        if gap_seconds > max(30, mins * 60):
+            self.pause_timer(auto=True, effective_end=self.last_tick_at)
+            self.banner.setText("تایمر به دلیل وقفه طولانی سیستم (استندبای/خاموشی/قفل) متوقف شد و آن زمان محاسبه نشد.")
+            return
+        idle = IdleMonitor.idle_seconds()
+        if idle >= mins * 60:
+            last_input = now - timedelta(seconds=idle)
+            self.pause_timer(auto=True, effective_end=max(self.timer_state.start_time, last_input))
+            self.banner.setText("تایمر به دلیل عدم فعالیت موس/کیبورد متوقف شد و زمان بیکاری، استندبای یا خاموشی محاسبه نشد.")
 
     def build_app_icon(self) -> QIcon:
         icon = QIcon(self.db.get_setting("tray_icon_path", ""))
@@ -621,6 +956,104 @@ class MainWindow(QMainWindow):
             self.pause_act.setEnabled(False)
             self.stop_act.setEnabled(False)
 
+    def records_filter(self):
+        start = self.records_start.date().toPyDate()
+        end = self.records_end.date().toPyDate()
+        args = [datetime.combine(start, datetime.min.time()).isoformat(), (datetime.combine(end, datetime.min.time()) + timedelta(days=1)).isoformat()]
+        where = "WHERE status='saved' AND start_time>=? AND start_time<?"
+        pid = self.records_project.currentData()
+        if pid:
+            where += " AND project_id=?"
+            args.append(pid)
+        return where, args
+
+    def load_records(self):
+        if not hasattr(self, "records_table"):
+            return
+        where, args = self.records_filter()
+        rows = self.db.conn.execute(f"SELECT * FROM time_entries {where} ORDER BY start_time DESC", args).fetchall()
+        self.records_table.setRowCount(len(rows))
+        for i, r in enumerate(rows):
+            st = parse_datetime(r["start_time"])
+            en = parse_datetime(r["end_time"])
+            values = [
+                r["id"], st.date().isoformat(), r["project_name_snapshot"], r["task_description"] or "",
+                st.strftime("%H:%M:%S"), en.strftime("%H:%M:%S"), format_duration(r["duration_seconds"]),
+                money(r["hourly_rate_snapshot"]), money(r["amount"]),
+            ]
+            for col, value in enumerate(values):
+                item = rtl_item(value)
+                if col == 0:
+                    item.setData(Qt.ItemDataRole.UserRole, r["id"])
+                self.records_table.setItem(i, col, item)
+
+        summary = self.db.conn.execute(
+            f"""
+            SELECT project_name_snapshot, COUNT(*) AS count_records,
+                   COALESCE(SUM(duration_seconds),0) AS total_seconds,
+                   COALESCE(SUM(amount),0) AS total_amount
+            FROM time_entries {where}
+            GROUP BY project_name_snapshot
+            ORDER BY project_name_snapshot
+            """,
+            args,
+        ).fetchall()
+        self.records_summary.setRowCount(len(summary) + 1)
+        total_count = total_seconds = total_amount = 0
+        for i, r in enumerate(summary):
+            total_count += r["count_records"] or 0
+            total_seconds += r["total_seconds"] or 0
+            total_amount += r["total_amount"] or 0
+            for col, value in enumerate([r["project_name_snapshot"], r["count_records"], format_duration(r["total_seconds"]), money(r["total_amount"])]):
+                self.records_summary.setItem(i, col, rtl_item(value))
+        last = len(summary)
+        for col, value in enumerate(["TOTAL", total_count, format_duration(total_seconds), money(total_amount)]):
+            self.records_summary.setItem(last, col, rtl_item(value))
+
+    def show_project_records(self, project_id: int):
+        if not hasattr(self, "records_project"):
+            return
+        for index in range(self.records_project.count()):
+            if self.records_project.itemData(index) == project_id:
+                self.records_project.setCurrentIndex(index)
+                break
+        records_index = self.main_tabs.indexOf(self.records_table.parentWidget())
+        if records_index >= 0:
+            self.main_tabs.setCurrentIndex(records_index)
+        self.load_records()
+        self.show_from_tray()
+
+    def selected_record_id(self):
+        row = self.records_table.currentRow()
+        if row < 0:
+            return None
+        item = self.records_table.item(row, 0)
+        return int(item.data(Qt.ItemDataRole.UserRole) or item.text()) if item else None
+
+    def edit_selected_record(self):
+        record_id = self.selected_record_id()
+        if not record_id:
+            QMessageBox.information(self, "Records", "Please select a record first.")
+            return
+        dlg = RecordEditDialog(self.db, record_id, self)
+        if dlg.exec():
+            self.load_records()
+
+    def delete_selected_record(self):
+        record_id = self.selected_record_id()
+        if not record_id:
+            QMessageBox.information(self, "Records", "Please select a record first.")
+            return
+        r = QMessageBox.question(
+            self, "Delete record", "آیا از حذف این رکورد مطمئن هستید؟",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if r != QMessageBox.StandardButton.Yes:
+            return
+        self.db.conn.execute("DELETE FROM time_entries WHERE id=?", (record_id,))
+        self.db.conn.commit()
+        self.load_records()
+
     def open_settings(self):
         dlg = SettingsDialog(self.db, self.app_dir, self)
         if dlg.exec():
@@ -636,6 +1069,9 @@ class MainWindow(QMainWindow):
         end = QDateEdit(); end.setCalendarPopup(True); end.setDate(datetime.now().date())
         go = QPushButton("Export")
         layout.addRow("Period", period); layout.addRow("Project", project); layout.addRow("Start", start); layout.addRow("End", end); layout.addRow(go)
+        layout.setFormAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop)
+        layout.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        configure_rtl_widget(dlg)
 
         def do_export():
             sdt, edt = self.resolve_period(period.currentText(), start.date().toPyDate(), end.date().toPyDate())
@@ -702,11 +1138,20 @@ class MainWindow(QMainWindow):
 
 
 def main():
+    app = QApplication(sys.argv)
+    apply_app_font(app)
+    if SingleInstanceServer.signal_existing():
+        QMessageBox.information(None, "Time Income Tracker", "برنامه از قبل باز است و همان پنجره فعال شد.")
+        return
+
     d = app_data_dir()
     setup_logging(d)
     db = DB(d / "time_income.db")
-    app = QApplication(sys.argv)
     win = MainWindow(db, d)
+    single_instance = SingleInstanceServer(win.show_from_tray)
+    if not single_instance.listen():
+        QMessageBox.warning(None, "Time Income Tracker", "برنامه نتوانست قفل اجرای تکی را بسازد.")
+        return
     app.setWindowIcon(win.windowIcon())
     if db.get_setting("show_main_window_on_startup", "0") == "1":
         win.show_from_tray()
