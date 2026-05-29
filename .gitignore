@@ -1,0 +1,19 @@
+# Python cache and virtual environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Build outputs
+dist/
+build/
+*.spec
+
+# Binary image/icon assets should not be committed
+*.ico
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.webp
